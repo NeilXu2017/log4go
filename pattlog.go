@@ -1,12 +1,9 @@
-// Copyright (C) 2010, Kyle Lemons <kyle@kylelemons.net>.  All rights reserved.
-
 package log4go
 
 import (
 	"bytes"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
 )
 
@@ -16,15 +13,10 @@ const (
 	FORMAT_ABBREV  = "[%L] %M"
 )
 
-type formatCacheType struct {
-	LastUpdateSeconds    int64
-	shortTime, shortDate string
-	longTime, longDate   string
-}
-
-var formatCache = &formatCacheType{}
+type FormatLogWriter chan *LogRecord
 
 // Known format codes:
+// %Z - Time (15:04:05.999999999)
 // %T - Time (15:04:05 MST)
 // %t - Time (15:04)
 // %D - Date (2006/01/02)
@@ -41,43 +33,24 @@ func FormatLogRecord(format string, rec *LogRecord) string {
 	if len(format) == 0 {
 		return ""
 	}
-
 	out := bytes.NewBuffer(make([]byte, 0, 64))
-	secs := rec.Created.UnixNano() / 1e9
-
-	cache := *formatCache
-	if cache.LastUpdateSeconds != secs {
-		month, day, year := rec.Created.Month(), rec.Created.Day(), rec.Created.Year()
-		hour, minute, second := rec.Created.Hour(), rec.Created.Minute(), rec.Created.Second()
-		zone, _ := rec.Created.Zone()
-		updated := &formatCacheType{
-			LastUpdateSeconds: secs,
-			shortTime:         fmt.Sprintf("%02d:%02d", hour, minute),
-			shortDate:         fmt.Sprintf("%02d/%02d/%02d", day, month, year%100),
-			longTime:          fmt.Sprintf("%02d:%02d:%02d %s", hour, minute, second, zone),
-			longDate:          fmt.Sprintf("%04d/%02d/%02d", year, month, day),
-		}
-		cache = *updated
-		formatCache = updated
-
-	}
-	//custom format datetime pattern %D{2006-01-02T15:04:05}
-	formatByte := changeDttmFormat(format, rec)
-	// Split the string into pieces by % signs
-	pieces := bytes.Split(formatByte, []byte{'%'})
-
-	// Iterate over the pieces, replacing known formats
+	year, month, day := rec.Created.Date()
+	hour, minute, second, nanosecond := rec.Created.Hour(), rec.Created.Minute(), rec.Created.Second(), rec.Created.Nanosecond()
+	zone, _ := rec.Created.Zone()
+	pieces := bytes.Split([]byte(format), []byte{'%'})
 	for i, piece := range pieces {
 		if i > 0 && len(piece) > 0 {
 			switch piece[0] {
+			case 'Z':
+				out.WriteString(fmt.Sprintf("%02d:%02d:%02d.%09d %s", hour, minute, second, nanosecond, zone))
 			case 'T':
-				out.WriteString(cache.longTime)
+				out.WriteString(fmt.Sprintf("%02d:%02d:%02d %s", hour, minute, second, zone))
 			case 't':
-				out.WriteString(cache.shortTime)
+				out.WriteString(fmt.Sprintf("%02d:%02d", hour, minute))
 			case 'D':
-				out.WriteString(cache.longDate)
+				out.WriteString(fmt.Sprintf("%04d/%02d/%02d", year, month, day))
 			case 'd':
-				out.WriteString(cache.shortDate)
+				out.WriteString(fmt.Sprintf("%02d/%02d/%02d", day, month, year%100))
 			case 'L':
 				out.WriteString(levelStrings[rec.Level])
 			case 'S':
@@ -101,14 +74,9 @@ func FormatLogRecord(format string, rec *LogRecord) string {
 		}
 	}
 	out.WriteByte('\n')
-
 	return out.String()
 }
 
-// This is the standard writer that prints to standard output.
-type FormatLogWriter chan *LogRecord
-
-// This creates a new FormatLogWriter
 func NewFormatLogWriter(out io.Writer, format string) FormatLogWriter {
 	records := make(FormatLogWriter, LogBufferLength)
 	go records.run(out, format)
@@ -116,38 +84,20 @@ func NewFormatLogWriter(out io.Writer, format string) FormatLogWriter {
 }
 
 func (w FormatLogWriter) run(out io.Writer, format string) {
-	defer recoverPanic()
+	defer func() {
+		if e := recover(); e != nil {
+			fmt.Printf("Panicing %s\n", e)
+		}
+	}()
 	for rec := range w {
 		fmt.Fprint(out, FormatLogRecord(format, rec))
 	}
 }
 
-// This is the FormatLogWriter's output method.  This will block if the output
-// buffer is full.
 func (w FormatLogWriter) LogWrite(rec *LogRecord) {
 	w <- rec
 }
 
-// Close stops the logger from sending messages to standard output.  Attempts to
-// send log messages to this logger after a Close have undefined behavior.
 func (w FormatLogWriter) Close() {
 	close(w)
-}
-
-func changeDttmFormat(format string, rec *LogRecord) []byte {
-	formatByte := []byte(format)
-	r := regexp.MustCompile("\\%D\\{(.*?)\\}")
-	i := 0
-	formatByte = r.ReplaceAllFunc(formatByte, func(s []byte) []byte {
-		if i < 2 {
-			i++
-			str := string(s)
-			str = strings.Replace(str, "%D", "", -1)
-			str = strings.Replace(str, "{", "", -1)
-			str = strings.Replace(str, "}", "", -1)
-			return []byte(rec.Created.Format(str))
-		}
-		return s
-	})
-	return formatByte
 }
